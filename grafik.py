@@ -3,95 +3,178 @@ import datetime
 import os
 import customtkinter as ctk
 import pandas as pd
-from tkinter import ttk, messagebox, simpledialog
+from tkinter import ttk, messagebox, simpledialog, filedialog
 
 import sqlite3
 
-DB_NAME = "grafik.db"
+from baza import Pracownik, db_aktualizuj_pracownika, db_dodaj_pracownika, init_db, Miesiac, db_pobierz_pracownikow, db_usun_pracownika, DzienPracy
+from generator import GeneratorGrafiku
 
-def init_db():
-    """Tworzy bazę danych i tabelę pracowników, jeśli jeszcze nie istnieją."""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS pracownicy (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            imie TEXT NOT NULL,
-            nazwisko TEXT NOT NULL,
-            etat REAL DEFAULT 1.0
+
+class OknoEdycjiPracownika(ctk.CTkToplevel):
+    """Okno dialogowe do dodawania i edycji danych pracownika z wyborem dni miesiąca oraz importem CSV."""
+
+    def __init__(self, parent, pracownik: Pracownik = None, max_dni_miesiaca: int = 31):
+        super().__init__(parent)
+        self.parent = parent
+        self.pracownik = pracownik
+        self.max_dni = max_dni_miesiaca
+        self.wynik = False
+
+        self.title("Edycja Pracownika" if pracownik else "Dodaj Pracownika")
+        self.geometry("420x560")
+        self.resizable(False, False)
+        self.grab_set()
+
+        self._zbuduj_formularz()
+
+    def _zbuduj_formularz(self):
+        ctk.CTkLabel(self, text="Imię:").pack(anchor="w", padx=20, pady=(10, 2))
+        self.entry_imie = ctk.CTkEntry(self, width=380)
+        self.entry_imie.pack(padx=20)
+        if self.pracownik:
+            self.entry_imie.insert(0, self.pracownik.imie)
+
+        ctk.CTkLabel(self, text="Nazwisko:").pack(anchor="w", padx=20, pady=(5, 2))
+        self.entry_nazwisko = ctk.CTkEntry(self, width=380)
+        self.entry_nazwisko.pack(padx=20)
+        if self.pracownik:
+            self.entry_nazwisko.insert(0, self.pracownik.nazwisko)
+
+        ctk.CTkLabel(self, text="Wymiar etatu (np. 1.0, 0.5):").pack(anchor="w", padx=20, pady=(5, 2))
+        self.entry_etat = ctk.CTkEntry(self, width=380)
+        self.entry_etat.pack(padx=20)
+        self.entry_etat.insert(0, str(self.pracownik.etat) if self.pracownik else "1.0")
+
+        # Nagłówek i przycisk importu z CSV
+        frame_header_dni = ctk.CTkFrame(self, fg_color="transparent")
+        frame_header_dni.pack(fill="x", padx=20, pady=(10, 2))
+
+        ctk.CTkLabel(frame_header_dni, text="Dozwolone dni miesiąca:").pack(side="left")
+        ctk.CTkButton(
+            frame_header_dni,
+            text="Wczytaj z CSV",
+            width=110,
+            fg_color="#0284c7",
+            hover_color="#0369a1",
+            command=self._importuj_z_csv
+        ).pack(side="right")
+
+        # Scrollable Frame na numery dni
+        self.frame_scroll_dni = ctk.CTkScrollableFrame(self, height=180)
+        self.frame_scroll_dni.pack(fill="x", padx=20, pady=5)
+
+        self.checkboxy_dni = {}
+        cols = 6
+        for dzien in range(1, self.max_dni + 1):
+            domyslny_stan = (dzien in self.pracownik.dni_pracy) if self.pracownik else True
+            var = ctk.BooleanVar(value=domyslny_stan)
+            chk = ctk.CTkCheckBox(self.frame_scroll_dni, text=str(dzien), variable=var, width=50)
+            r = (dzien - 1) // cols
+            c = (dzien - 1) % cols
+            chk.grid(row=r, column=c, padx=3, pady=3, sticky="w")
+            self.checkboxy_dni[dzien] = var
+
+        # Przyciski Zaznacz/Odznacz wszystko
+        frame_quick = ctk.CTkFrame(self, fg_color="transparent")
+        frame_quick.pack(fill="x", padx=20, pady=2)
+        ctk.CTkButton(frame_quick, text="Zaznacz wszystkie", width=120, fg_color="gray", command=lambda: self._zmien_wszystkie(True)).pack(side="left")
+        ctk.CTkButton(frame_quick, text="Odznacz wszystkie", width=120, fg_color="gray", command=lambda: self._zmien_wszystkie(False)).pack(side="right")
+
+        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
+        btn_frame.pack(fill="x", padx=20, pady=(15, 10))
+
+        ctk.CTkButton(btn_frame, text="Zapisz", fg_color="#16a34a", hover_color="#15803d", command=self._zapisz).pack(side="right", padx=5)
+        ctk.CTkButton(btn_frame, text="Anuluj", fg_color="gray", command=self.destroy).pack(side="right", padx=5)
+
+    def _zmien_wszystkie(self, stan: bool):
+        for var in self.checkboxy_dni.values():
+            var.set(stan)
+
+    def _importuj_z_csv(self):
+        filepath = filedialog.askopenfilename(
+            title="Wybierz plik CSV z dniami pracy",
+            filetypes=[("Pliki CSV", "*.csv"), ("Wszystkie pliki", "*.*")],
+            parent=self
         )
-    """)
-    conn.commit()
-    conn.close()
+        if not filepath:
+            return
 
-def db_pobierz_pracownikow():
-    """Pobiera wszystkich pracowników z bazy SQLite."""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, imie, nazwisko, etat FROM pracownicy")
-    rows = cursor.fetchall()
-    conn.close()
-    return rows
+        try:
+            # Wczytywanie pliku CSV
+            df = pd.read_csv(filepath)
 
-def db_dodaj_pracownika(imie, nazwisko, etat):
-    """Dodaje nowego pracownika do bazy danych."""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("INSERT INTO pracownicy (imie, nazwisko, etat) VALUES (?, ?, ?)", (imie, nazwisko, etat))
-    conn.commit()
-    conn.close()
+            pobrane_dni = []
+            # Próba znalezienia kolumny wskazującej dzień
+            kolumny = [col.lower().strip() for col in df.columns]
+            target_col = None
+            for c in df.columns:
+                if c.lower().strip() in ["dzien", "dzień", "day", "dni"]:
+                    target_col = c
+                    break
 
-def db_usun_pracownika(imie, nazwisko):
-    """Usuwa pracownika z bazy danych."""
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM pracownicy WHERE imie = ? AND nazwisko = ?", (imie, nazwisko))
-    conn.commit()
-    conn.close()
+            if target_col:
+                pobrane_dni = df[target_col].dropna().tolist()
+            else:
+                # Jeśli brak pasującej nazwy kolumny, pobieramy wszystkie liczby z pliku
+                pobrane_dni = df.iloc[:, 0].dropna().tolist()
 
-# ------------------------------------------------------------------
+            wyselekcjonowane = set()
+            for val in pobrane_dni:
+                try:
+                    # Próba konwersji na int lub wyciągnięcie dnia z daty
+                    if isinstance(val, str) and "-" in val:
+                        val = datetime.datetime.strptime(val.strip(), "%Y-%m-%d").day
+                    d_int = int(float(val))
+                    if 1 <= d_int <= 31:
+                        wyselekcjonowane.add(d_int)
+                except ValueError:
+                    continue
 
-ctk.set_appearance_mode("System")
-ctk.set_default_color_theme("blue")
+            if not wyselekcjonowane:
+                messagebox.showwarning("Informacja", "Nie udało się odczytać prawidłowych dni z pliku CSV.", parent=self)
+                return
 
+            # Aktualizacja checkboksów
+            for d, var in self.checkboxy_dni.items():
+                var.set(d in wyselekcjonowane)
 
-class Pracownik:
-    def __init__(self, imie, nazwisko, etat=1.0, db_id=None):
-        self.db_id = db_id
-        self.imie = imie
-        self.nazwisko = nazwisko
-        self.etat = float(etat)
-        self.wyrobione_godziny = 0.0
+            messagebox.showinfo("Sukces", f"Pomyślnie zaimportowano {len(wyselekcjonowane)} dni z pliku CSV.", parent=self)
 
-    def get_norma_miesiaca(self, norma_bazy_miesiaca: float) -> float:
-        return self.etat * norma_bazy_miesiaca
+        except Exception as e:
+            messagebox.showerror("Błąd pliku", f"Błąd podczas odczytu pliku CSV:\n{e}", parent=self)
 
-    @property
-    def pelne_nazwisko(self):
-        return f"{self.imie} {self.nazwisko}"
+    def _zapisz(self):
+        imie = self.entry_imie.get().strip()
+        nazwisko = self.entry_nazwisko.get().strip()
+        etat_str = self.entry_etat.get().replace(",", ".").strip()
 
-    @property
-    def nazwisko_pelne(self):
-        return f"{self.imie} {self.nazwisko}"
+        if not imie or not nazwisko:
+            messagebox.showerror("Błąd", "Imię i nazwisko nie mogą być puste.", parent=self)
+            return
 
-    def norma_dobowa(self, norma_bazy_miesiaca: float) -> float:
-        return self.get_norma_miesiaca(norma_bazy_miesiaca) / 20.0
+        try:
+            etat = float(etat_str)
+            if etat <= 0:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror("Błąd", "Wprowadź poprawną część etatu (np. 1.0, 0.5).", parent=self)
+            return
 
-    def roznica_godzin(self, norma_bazy_miesiaca: float) -> float:
-        return self.wyrobione_godziny - self.get_norma_miesiaca(norma_bazy_miesiaca)
+        wybrane_dni = [str(d) for d, var in self.checkboxy_dni.items() if var.get()]
+        if not wybrane_dni:
+            messagebox.showerror("Błąd", "Zaznacz co najmniej jeden dzień pracy.", parent=self)
+            return
 
+        dni_pracy_str = ",".join(wybrane_dni)
 
-class DzienPracy:
-    dni_tygodnia_pl = ["Pn", "Wt", "Śr", "Cz", "Pt", "Sb", "Nd"]
+        if self.pracownik:
+            db_aktualizuj_pracownika(self.pracownik.db_id, imie, nazwisko, etat, dni_pracy_str)
+        else:
+            db_dodaj_pracownika(imie, nazwisko, etat, dni_pracy_str)
 
-    def __init__(self, data: datetime.date):
-        self.data = data
-        self.dzien_tyg = self.dni_tygodnia_pl[data.weekday()]
-        self.czy_roboczy = data.weekday() < 5
-
-    @property
-    def sformatowany_dzien(self):
-        return f"{self.data.day:02d}\n{self.dzien_tyg}"
+        self.wynik = True
+        self.destroy()
 
 
 class TabelaGrafikApp(ctk.CTk):
@@ -125,22 +208,23 @@ class TabelaGrafikApp(ctk.CTk):
         self.geometry("1450x720")
 
         os.makedirs("grafiki", exist_ok=True)
-        init_db()  # Inicjalizacja SQLite
+        init_db()
 
+        dzis = datetime.date.today()
+        self.wybrany_rok = dzis.year
+        self.wybrany_miesiac = dzis.month
         self.norma_miesiaca = 160.0
+
+        self.obj_miesiac = Miesiac(self.wybrany_rok, self.wybrany_miesiac, self.norma_miesiaca)
+
         self.pracownicy = self._wczytaj_pracownikow_z_bazy()
 
-        self.dni_miesiaca = []
         self.pola = {}
         self.dane_pól = {}
         self.etykiety_sum = {}
         self.etykiety_sum_dni = {}
 
         self.aktywny_kolektyw = (0, 0)
-
-        dzis = datetime.date.today()
-        self.wybrany_rok = dzis.year
-        self.wybrany_miesiac = dzis.month
 
         self._zbuduj_ui()
         self._wygeneruj_tabele()
@@ -151,17 +235,17 @@ class TabelaGrafikApp(ctk.CTk):
         rekordy = db_pobierz_pracownikow()
         if not rekordy:
             domyslne = [
-                ("Jan", "Kowalski", 1.0),
-                ("Anna", "Nowak", 1.0),
-                ("Piotr", "Wiśniewski", 0.5),
-                ("Katarzyna", "Wójcik", 0.75)
+                ("Jan", "Kowalski", 1.0, "0,1,2,3,4"),
+                ("Anna", "Nowak", 1.0, "0,1,2,3,4,5,6"),
+                ("Piotr", "Wiśniewski", 0.5, "0,1,2,3,4"),
+                ("Katarzyna", "Wójcik", 0.75, "0,1,2,3,4,5,6")
             ]
-            for imie, nazwisko, etat in domyslne:
-                db_dodaj_pracownika(imie, nazwisko, etat)
+            for imie, nazwisko, etat, dni in domyslne:
+                db_dodaj_pracownika(imie, nazwisko, etat, dni)
             rekordy = db_pobierz_pracownikow()
 
         return [
-            Pracownik(p[1], p[2], p[3], db_id=p[0])
+            Pracownik(p[1], p[2], p[3], dni_pracy=p[4], db_id=p[0])
             for p in rekordy
         ]
 
@@ -193,11 +277,24 @@ class TabelaGrafikApp(ctk.CTk):
         btn_update_norma.pack(side="left", padx=2)
 
         ctk.CTkLabel(top_frame, text=" |  Pracownicy:").pack(side="left", padx=(15, 5))
-        btn_add = ctk.CTkButton(top_frame, text="+ Dodaj", width=80, command=self.dodaj_pracownika)
+        btn_add = ctk.CTkButton(top_frame, text="+ Dodaj", width=75, command=self.dodaj_pracownika)
         btn_add.pack(side="left", padx=2)
 
-        btn_del = ctk.CTkButton(top_frame, text="- Usuń", width=80, fg_color="firebrick", command=self.usun_pracownika)
+        btn_edit = ctk.CTkButton(top_frame, text="Edytuj", width=75, command=self.edytuj_zaznaczonego_pracownika)
+        btn_edit.pack(side="left", padx=2)
+
+        btn_del = ctk.CTkButton(top_frame, text="Usuń", width=75, fg_color="firebrick", command=self.usun_pracownika)
         btn_del.pack(side="left", padx=2)
+
+        btn_auto = ctk.CTkButton(
+            top_frame,
+            text="Auto Grafik",
+            width=100,
+            fg_color="#16a34a",
+            hover_color="#15803d",
+            command=self.automatycznie_generuj_grafik
+        )
+        btn_auto.pack(side="left", padx=(15, 2))
 
         self.main_container = ctk.CTkFrame(self)
         self.main_container.pack(fill="both", expand=True, padx=15, pady=5)
@@ -232,7 +329,7 @@ class TabelaGrafikApp(ctk.CTk):
         legenda_frame.pack(fill="x", padx=15, pady=(2, 0))
         ctk.CTkLabel(
             legenda_frame,
-            text="Instrukcja:  [Strzałki] = Autoprzesuwanie i nawigacja | [P,D,N,U,M,4,L] = Szybki wpis",
+            text="Instrukcja:  [Podwójne kliknięcie na imię] = Edycja pracownika | [Strzałki] = Nawigacja",
             font=ctk.CTkFont(size=11)
         ).pack(side="left", padx=10, pady=2)
 
@@ -245,6 +342,7 @@ class TabelaGrafikApp(ctk.CTk):
             if val <= 0:
                 raise ValueError
             self.norma_miesiaca = val
+            self.obj_miesiac.norma_miesiaca = val
             self.przelicz_sumy()
         except ValueError:
             messagebox.showerror("Błąd", "Wprowadź poprawną dodatnią liczbę dla normy miesięcznej.", parent=self)
@@ -280,15 +378,9 @@ class TabelaGrafikApp(ctk.CTk):
         self.etykiety_sum.clear()
         self.etykiety_sum_dni.clear()
 
-        liczba_dni = calendar.monthrange(self.wybrany_rok, self.wybrany_miesiac)[1]
-        self.dni_miesiaca = [
-            DzienPracy(datetime.date(self.wybrany_rok, self.wybrany_miesiac, d))
-            for d in range(1, liczba_dni + 1)
-        ]
-
         ctk.CTkLabel(self.left_frame, text="Pracownik", font=ctk.CTkFont(weight="bold"), height=35).pack(fill="x", padx=5, pady=5)
 
-        for col_idx, dzien_obj in enumerate(self.dni_miesiaca):
+        for col_idx, dzien_obj in enumerate(self.obj_miesiac.dni):
             kolor = "white" if dzien_obj.czy_roboczy else "dodgerblue"
             lbl = ctk.CTkLabel(
                 self.scroll_frame,
@@ -302,10 +394,12 @@ class TabelaGrafikApp(ctk.CTk):
         ctk.CTkLabel(self.right_frame, text="Suma godz. / Bilans", font=ctk.CTkFont(weight="bold"), height=35).pack(fill="x", padx=5, pady=5)
 
         for r_idx, p in enumerate(self.pracownicy):
-            lbl_emp = ctk.CTkLabel(self.left_frame, text=p.nazwisko_pelne, anchor="w", height=28)
+            lbl_emp = ctk.CTkLabel(self.left_frame, text=p.pelne_nazwisko, anchor="w", height=28, cursor="hand2")
             lbl_emp.pack(fill="x", padx=5, pady=3)
+            # Podwójne kliknięcie na pracownika otwiera edycję
+            lbl_emp.bind("<Double-Button-1>", lambda e, prac=p: self._otworz_edycje_pracownika(prac))
 
-            for c_idx, dzien_obj in enumerate(self.dni_miesiaca):
+            for c_idx, dzien_obj in enumerate(self.obj_miesiac.dni):
                 opt_menu = ctk.CTkOptionMenu(
                     self.scroll_frame,
                     values=self.STATUSY,
@@ -337,7 +431,7 @@ class TabelaGrafikApp(ctk.CTk):
 
         ctk.CTkLabel(self.left_frame, text="", font=ctk.CTkFont(size=10, weight="bold")).pack(fill="x", padx=5, pady=10)
 
-        for col_idx, dzien_obj in enumerate(self.dni_miesiaca):
+        for col_idx, dzien_obj in enumerate(self.obj_miesiac.dni):
             lbl_day_sum = ctk.CTkLabel(
                 self.scroll_frame,
                 text="0 / 0",
@@ -353,6 +447,53 @@ class TabelaGrafikApp(ctk.CTk):
             self._ustaw_aktywny(0, 0)
 
         self.przelicz_sumy()
+
+    def _otworz_edycje_pracownika(self, pracownik: Pracownik):
+        okno = OknoEdycjiPracownika(self, pracownik)
+        self.wait_window(okno)
+        if okno.wynik:
+            self.pracownicy = self._wczytaj_pracownikow_z_bazy()
+            self._wygeneruj_tabele()
+
+    def edytuj_zaznaczonego_pracownika(self):
+        if not self.pracownicy:
+            return
+        r, _ = self.aktywny_kolektyw
+        if 0 <= r < len(self.pracownicy):
+            self._otworz_edycje_pracownika(self.pracownicy[r])
+
+    def dodaj_pracownika(self):
+        okno = OknoEdycjiPracownika(self)
+        self.wait_window(okno)
+        if okno.wynik:
+            self.pracownicy = self._wczytaj_pracownikow_z_bazy()
+            self._wygeneruj_tabele()
+
+    def usun_pracownika(self):
+        if not self.pracownicy:
+            return
+        opcje = [p.pelne_nazwisko for p in self.pracownicy]
+
+        wybor = simpledialog.askstring(
+            "Usuń Pracownika",
+            f"Wpisz imię i nazwisko lub nazwisko do usunięcia:\n({', '.join(opcje)})",
+            parent=self
+        )
+        if wybor:
+            wybor_clean = wybor.strip()
+            do_usuniecia = None
+
+            for p in self.pracownicy:
+                if p.pelne_nazwisko == wybor_clean or p.nazwisko == wybor_clean:
+                    do_usuniecia = p
+                    break
+
+            if do_usuniecia:
+                db_usun_pracownika(do_usuniecia.db_id)
+                self.pracownicy = self._wczytaj_pracownikow_z_bazy()
+                self._wygeneruj_tabele()
+            else:
+                messagebox.showwarning("Informacja", "Nie znaleziono podanego pracownika.", parent=self)
 
     def _otworz_menu(self, opt_menu):
         opt_menu._dropdown_menu.open(opt_menu.winfo_rootx(), opt_menu.winfo_rooty() + opt_menu.winfo_height())
@@ -423,7 +564,7 @@ class TabelaGrafikApp(ctk.CTk):
 
         r, c = self.aktywny_kolektyw
         max_r = len(self.pracownicy) - 1
-        max_c = len(self.dni_miesiaca) - 1
+        max_c = len(self.obj_miesiac.dni) - 1
 
         key = event.keysym.lower()
         char = event.char.lower()
@@ -449,28 +590,25 @@ class TabelaGrafikApp(ctk.CTk):
 
     def _zlicz_stany(self, pracownik: Pracownik):
         licznik = {"D": 0, "N": 0, "UUW": 0, "L4": 0, "M": 0, "4": 0, "X": 0}
-        for dzien_obj in self.dni_miesiaca:
-            for (r, c), (p, d) in self.dane_pól.items():
-                if p == pracownik and d == dzien_obj:
-                    stan = self.pola[(r, c)].get()
-                    if stan in licznik:
-                        licznik[stan] += 1
+        for dzien_obj in self.obj_miesiac.dni:
+            stan = dzien_obj.pobierz_zmiane(pracownik.db_id)
+            if stan in licznik:
+                licznik[stan] += 1
         return licznik
 
     def _przelicz_pracownika(self, pracownik: Pracownik):
         suma_godzin = 0.0
 
-        for (r, c), (p, dzien_obj) in self.dane_pól.items():
-            if p == pracownik:
-                stan = self.pola[(r, c)].get()
-                if stan == "UUW":
-                    suma_godzin += pracownik.norma_dobowa(self.norma_miesiaca)
-                elif stan in ["D", "N"]:
-                    suma_godzin += 12.0
-                elif stan == "M":
-                    suma_godzin += 8.0
-                elif stan == "4":
-                    suma_godzin += 4.0
+        for dzien_obj in self.obj_miesiac.dni:
+            stan = dzien_obj.pobierz_zmiane(pracownik.db_id)
+            if stan == "UUW":
+                suma_godzin += pracownik.norma_dobowa(self.norma_miesiaca)
+            elif stan in ["D", "N"]:
+                suma_godzin += 12.0
+            elif stan == "M":
+                suma_godzin += 8.0
+            elif stan == "4":
+                suma_godzin += 4.0
 
         pracownik.wyrobione_godziny = suma_godzin
         norma_pracownika = pracownik.get_norma_miesiaca(self.norma_miesiaca)
@@ -486,21 +624,14 @@ class TabelaGrafikApp(ctk.CTk):
             self.etykiety_sum[pracownik].configure(text=tekst)
 
     def _przelicz_dzien(self, dzien_obj: DzienPracy):
-        obstawione_godziny = 0.0
+        pracownicy_mapa = {p.db_id: p for p in self.pracownicy}
+        obstawione_godziny = dzien_obj.oblicz_obstawienie_godzin(pracownicy_mapa, self.norma_miesiaca)
+
         stany = {"D": 0, "N": 0, "UUW": 0, "M": 0, "4": 0, "L4": 0}
-
-        for (r, c), (pracownik, d) in self.dane_pól.items():
-            if d == dzien_obj:
-                stan = self.pola[(r, c)].get()
-                if stan in ["D", "N"]:
-                    obstawione_godziny += 12.0
-                elif stan == "M":
-                    obstawione_godziny += 8.0
-                elif stan == "4":
-                    obstawione_godziny += 4.0
-
-                if stan in stany:
-                    stany[stan] += 1
+        for p in self.pracownicy:
+            stan = dzien_obj.pobierz_zmiane(p.db_id)
+            if stan in stany:
+                stany[stan] += 1
 
         wymagane_godziny = 24.0
         obs_str = f"{int(obstawione_godziny)}" if obstawione_godziny.is_integer() else f"{obstawione_godziny:.1f}"
@@ -522,13 +653,19 @@ class TabelaGrafikApp(ctk.CTk):
             self.etykiety_sum_dni[dzien_obj].configure(text=tekst, text_color=kolor)
 
     def _aktualizuj_stan(self, pracownik: Pracownik, dzien_obj: DzienPracy):
+        for (r, c), (p, d) in self.dane_pól.items():
+            if p == pracownik and d == dzien_obj:
+                nowy_stan = self.pola[(r, c)].get()
+                dzien_obj.ustaw_zmiane(pracownik.db_id, nowy_stan)
+                break
+
         self._przelicz_pracownika(pracownik)
         self._przelicz_dzien(dzien_obj)
 
     def przelicz_sumy(self):
         for p in self.pracownicy:
             self._przelicz_pracownika(p)
-        for d in self.dni_miesiaca:
+        for d in self.obj_miesiac.dni:
             self._przelicz_dzien(d)
 
     def _zmiana_daty(self, *args):
@@ -536,67 +673,16 @@ class TabelaGrafikApp(ctk.CTk):
             self.zapisz_do_excela()
             self.wybrany_rok = int(self.rok_entry.get())
             self.wybrany_miesiac = int(self.miesiac_option.get())
+            self.obj_miesiac = Miesiac(self.wybrany_rok, self.wybrany_miesiac, self.norma_miesiaca)
             self._wygeneruj_tabele()
         except ValueError:
             messagebox.showerror("Błąd", "Wprowadź poprawny rok.", parent=self)
 
-    def dodaj_pracownika(self):
-        imie = simpledialog.askstring("Nowy Pracownik", "Wpisz imię:", parent=self)
-        if not imie:
-            return
-
-        nazwisko = simpledialog.askstring("Nowy Pracownik", "Wpisz nazwisko:", parent=self)
-        if not nazwisko:
-            return
-
-        etat_input = simpledialog.askstring(
-            "Część etatu",
-            "Wprowadź część etatu (np. 1.0 dla całego, 0.5 dla połowy, 0.75 dla 3/4):",
-            initialvalue="1.0",
-            parent=self
-        )
-
-        try:
-            etat_val = float(etat_input.replace(",", ".")) if etat_input else 1.0
-            if etat_val <= 0:
-                raise ValueError
-
-            db_dodaj_pracownika(imie.strip(), nazwisko.strip(), etat_val)
-            self.pracownicy = self._wczytaj_pracownikow_z_bazy()
-            self._wygeneruj_tabele()
-        except ValueError:
-            messagebox.showerror("Błąd", "Niepoprawna wartość części etatu (wymagana liczba dodatnia, np. 0.5).", parent=self)
-
-    def usun_pracownika(self):
-        if not self.pracownicy:
-            return
-        opcje = [p.pelne_nazwisko for p in self.pracownicy]
-
-        wybor = simpledialog.askstring(
-            "Usuń Pracownika",
-            f"Wpisz imię i nazwisko lub nazwisko do usunięcia:\n({', '.join(opcje)})",
-            parent=self
-        )
-        if wybor:
-            wybor_clean = wybor.strip()
-            do_usuniecia = None
-
-            for p in self.pracownicy:
-                if p.pelne_nazwisko == wybor_clean or p.nazwisko == wybor_clean:
-                    do_usuniecia = p
-                    break
-
-            if do_usuniecia:
-                db_usun_pracownika(do_usuniecia.imie, do_usuniecia.nazwisko)
-                self.pracownicy = self._wczytaj_pracownikow_z_bazy()
-                self._wygeneruj_tabele()
-            else:
-                messagebox.showwarning("Informacja", "Nie znaleziono podanego pracownika.", parent=self)
-
     def wczytaj_z_excela(self):
         filename = f"grafiki/grafik_stany_{self.wybrany_rok}_{self.wybrany_miesiac:02d}.xlsx"
         if not os.path.exists(filename):
-            for (r, c) in self.pola:
+            for (r, c), (prac, dzien_obj) in self.dane_pól.items():
+                dzien_obj.ustaw_zmiane(prac.db_id, "P")
                 self._odswiez_kolor_komorki(r, c)
             return
 
@@ -606,15 +692,14 @@ class TabelaGrafikApp(ctk.CTk):
                 naglowek_excel = f"{dzien_obj.data.day:02d}.{dzien_obj.data.month:02d} ({dzien_obj.dzien_tyg})"
                 wiersz_prac = df[(df["Imię"] == prac.imie) & (df["Nazwisko"] == prac.nazwisko)]
 
+                stan = "P"
                 if not wiersz_prac.empty and naglowek_excel in df.columns:
                     wartosc = wiersz_prac.iloc[0][naglowek_excel]
                     if pd.notna(wartosc) and str(wartosc).strip() in self.STATUSY:
-                        self.pola[(r, c)].set(str(wartosc).strip())
-                    else:
-                        self.pola[(r, c)].set("P")
-                else:
-                    self.pola[(r, c)].set("P")
+                        stan = str(wartosc).strip()
 
+                self.pola[(r, c)].set(stan)
+                dzien_obj.ustaw_zmiane(prac.db_id, stan)
                 self._odswiez_kolor_komorki(r, c)
 
         except Exception as e:
@@ -630,16 +715,12 @@ class TabelaGrafikApp(ctk.CTk):
                 "Imię": p.imie,
                 "Nazwisko": p.nazwisko,
                 "Etat": p.etat,
-                "Norma (h)": p.get_norma_miesiaca(self.norma_miesiaca)
+                "Norma (h)": p.get_norma_miesiaca(self.norma_miesiaca),
+                "Dni pracy": p.dni_pracy_str()
             }
-            for dzien_obj in self.dni_miesiaca:
-                stan = "P"
-                for (r, c), (prac, d) in self.dane_pól.items():
-                    if prac == p and d == dzien_obj:
-                        stan = self.pola[(r, c)].get()
-                        break
+            for dzien_obj in self.obj_miesiac.dni:
                 naglowek_excel = f"{dzien_obj.data.day:02d}.{dzien_obj.data.month:02d} ({dzien_obj.dzien_tyg})"
-                row_data[naglowek_excel] = stan
+                row_data[naglowek_excel] = dzien_obj.pobierz_zmiane(p.db_id)
 
             row_data["Suma godz."] = p.wyrobione_godziny
             row_data["Bilans (h)"] = p.roznica_godzin(self.norma_miesiaca)
@@ -656,22 +737,13 @@ class TabelaGrafikApp(ctk.CTk):
             "Imię": "PODSUMOWANIE",
             "Nazwisko": "",
             "Etat": "",
-            "Norma (h)": ""
+            "Norma (h)": "",
+            "Dni pracy": ""
         }
-        for dzien_obj in self.dni_miesiaca:
-            obstawione = 0.0
-            for (r, c), (p, d) in self.dane_pól.items():
-                if d == dzien_obj:
-                    stan = self.pola[(r, c)].get()
-                    if stan in ["D", "N"]:
-                        obstawione += 12.0
-                    elif stan == "M":
-                        obstawione += 8.0
-                    elif stan == "4":
-                        obstawione += 4.0
-                    elif stan == "UUW":
-                        obstawione += p.norma_dobowa(self.norma_miesiaca)
 
+        pracownicy_mapa = {p.db_id: p for p in self.pracownicy}
+        for dzien_obj in self.obj_miesiac.dni:
+            obstawione = dzien_obj.oblicz_obstawienie_godzin(pracownicy_mapa, self.norma_miesiaca)
             naglowek_excel = f"{dzien_obj.data.day:02d}.{dzien_obj.data.month:02d} ({dzien_obj.dzien_tyg})"
             row_dzien_sum[naglowek_excel] = obstawione
 
@@ -696,6 +768,26 @@ class TabelaGrafikApp(ctk.CTk):
             )
         except Exception as e:
             messagebox.showerror("Błąd zapisu", f"Błąd podczas zapisu do Excela: {e}", parent=self)
+
+    def automatycznie_generuj_grafik(self):
+        if not self.pracownicy:
+            messagebox.showwarning("Brak pracowników", "Dodaj najpierw pracowników do bazy!", parent=self)
+            return
+
+        for (r, c), (pracownik, dzien_obj) in self.dane_pól.items():
+            status_z_gui = self.pola[(r, c)].get()
+            dzien_obj.ustaw_zmiane(pracownik.db_id, status_z_gui)
+
+        generator = GeneratorGrafiku(self.obj_miesiac, self.pracownicy, self.norma_miesiaca)
+        generator.generuj()
+
+        for (r, c), (pracownik, dzien_obj) in self.dane_pól.items():
+            nowy_status = dzien_obj.pobierz_zmiane(pracownik.db_id)
+            self.pola[(r, c)].set(nowy_status)
+            self._odswiez_kolor_komorki(r, c)
+
+        self.przelicz_sumy()
+        messagebox.showinfo("Sukces", "Dokończono układanie grafiku!", parent=self)
 
 
 if __name__ == "__main__":
