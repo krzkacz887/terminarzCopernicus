@@ -12,7 +12,7 @@ from generator import GeneratorGrafiku
 
 
 class OknoEdycjiPracownika(ctk.CTkToplevel):
-    """Okno dialogowe do dodawania i edycji danych pracownika z wyborem dni miesiąca oraz importem CSV."""
+    """Okno dialogowe do dodawania i edycji danych pracownika z wyborem preferencji."""
 
     def __init__(self, parent, pracownik: Pracownik = None, max_dni_miesiaca: int = 31):
         super().__init__(parent)
@@ -21,32 +21,63 @@ class OknoEdycjiPracownika(ctk.CTkToplevel):
         self.max_dni = max_dni_miesiaca
         self.wynik = False
 
+        self.checkboxy_dni = {}
+        self.checkboxy_pref_tyg = {}
+
         self.title("Edycja Pracownika" if pracownik else "Dodaj Pracownika")
-        self.geometry("420x560")
+        self.geometry("440x680")
         self.resizable(False, False)
         self.grab_set()
 
         self._zbuduj_formularz()
 
     def _zbuduj_formularz(self):
+        # 1. Dane podstawowe
         ctk.CTkLabel(self, text="Imię:").pack(anchor="w", padx=20, pady=(10, 2))
-        self.entry_imie = ctk.CTkEntry(self, width=380)
+        self.entry_imie = ctk.CTkEntry(self, width=400)
         self.entry_imie.pack(padx=20)
         if self.pracownik:
             self.entry_imie.insert(0, self.pracownik.imie)
 
         ctk.CTkLabel(self, text="Nazwisko:").pack(anchor="w", padx=20, pady=(5, 2))
-        self.entry_nazwisko = ctk.CTkEntry(self, width=380)
+        self.entry_nazwisko = ctk.CTkEntry(self, width=400)
         self.entry_nazwisko.pack(padx=20)
         if self.pracownik:
             self.entry_nazwisko.insert(0, self.pracownik.nazwisko)
 
         ctk.CTkLabel(self, text="Wymiar etatu (np. 1.0, 0.5):").pack(anchor="w", padx=20, pady=(5, 2))
-        self.entry_etat = ctk.CTkEntry(self, width=380)
+        self.entry_etat = ctk.CTkEntry(self, width=400)
         self.entry_etat.pack(padx=20)
         self.entry_etat.insert(0, str(self.pracownik.etat) if self.pracownik else "1.0")
 
-        # Nagłówek i przycisk importu z CSV
+        # 2. Preferowana pora dnia
+        ctk.CTkLabel(self, text="Preferowana pora dnia:").pack(anchor="w", padx=20, pady=(10, 2))
+        opcje_pory = ["Brak preferencji", "D (Dzień)", "N (Noc)"]
+        self.option_pora_dnia = ctk.CTkOptionMenu(self, values=opcje_pory, width=400)
+        self.option_pora_dnia.pack(padx=20)
+
+        # Ustawienie wartości początkowej
+        if self.pracownik and self.pracownik.pref_pora_dnia == "D":
+            self.option_pora_dnia.set("D (Dzień)")
+        elif self.pracownik and self.pracownik.pref_pora_dnia == "N":
+            self.option_pora_dnia.set("N (Noc)")
+        else:
+            self.option_pora_dnia.set("Brak preferencji")
+
+        # 3. Preferowane dni tygodnia (Pn-Nd)
+        ctk.CTkLabel(self, text="Preferowane dni tygodnia:").pack(anchor="w", padx=20, pady=(10, 2))
+        frame_pref_tyg = ctk.CTkFrame(self, fg_color="transparent")
+        frame_pref_tyg.pack(fill="x", padx=20)
+
+        dni_nazwy = Pracownik.DNI_NAZWY
+        for idx, nazwa in enumerate(dni_nazwy):
+            domyslny_stan = (idx in self.pracownik.pref_dni_tyg) if self.pracownik else False
+            var = ctk.BooleanVar(value=domyslny_stan)
+            chk = ctk.CTkCheckBox(frame_pref_tyg, text=nazwa, variable=var, width=50)
+            chk.grid(row=0, column=idx, padx=2, pady=2, sticky="w")
+            self.checkboxy_pref_tyg[idx] = var
+
+        # 4. Dozwolone dni miesiąca
         frame_header_dni = ctk.CTkFrame(self, fg_color="transparent")
         frame_header_dni.pack(fill="x", padx=20, pady=(10, 2))
 
@@ -60,11 +91,9 @@ class OknoEdycjiPracownika(ctk.CTkToplevel):
             command=self._importuj_z_csv
         ).pack(side="right")
 
-        # Scrollable Frame na numery dni
-        self.frame_scroll_dni = ctk.CTkScrollableFrame(self, height=180)
+        self.frame_scroll_dni = ctk.CTkScrollableFrame(self, height=140)
         self.frame_scroll_dni.pack(fill="x", padx=20, pady=5)
 
-        self.checkboxy_dni = {}
         cols = 6
         for dzien in range(1, self.max_dni + 1):
             domyslny_stan = (dzien in self.pracownik.dni_pracy) if self.pracownik else True
@@ -75,7 +104,7 @@ class OknoEdycjiPracownika(ctk.CTkToplevel):
             chk.grid(row=r, column=c, padx=3, pady=3, sticky="w")
             self.checkboxy_dni[dzien] = var
 
-        # Przyciski Zaznacz/Odznacz wszystko
+        # Przyciski
         frame_quick = ctk.CTkFrame(self, fg_color="transparent")
         frame_quick.pack(fill="x", padx=20, pady=2)
         ctk.CTkButton(frame_quick, text="Zaznacz wszystkie", width=120, fg_color="gray", command=lambda: self._zmien_wszystkie(True)).pack(side="left")
@@ -101,12 +130,9 @@ class OknoEdycjiPracownika(ctk.CTkToplevel):
             return
 
         try:
-            # Wczytywanie pliku CSV
             df = pd.read_csv(filepath)
-
             pobrane_dni = []
-            # Próba znalezienia kolumny wskazującej dzień
-            kolumny = [col.lower().strip() for col in df.columns]
+
             target_col = None
             for c in df.columns:
                 if c.lower().strip() in ["dzien", "dzień", "day", "dni"]:
@@ -116,13 +142,11 @@ class OknoEdycjiPracownika(ctk.CTkToplevel):
             if target_col:
                 pobrane_dni = df[target_col].dropna().tolist()
             else:
-                # Jeśli brak pasującej nazwy kolumny, pobieramy wszystkie liczby z pliku
                 pobrane_dni = df.iloc[:, 0].dropna().tolist()
 
             wyselekcjonowane = set()
             for val in pobrane_dni:
                 try:
-                    # Próba konwersji na int lub wyciągnięcie dnia z daty
                     if isinstance(val, str) and "-" in val:
                         val = datetime.datetime.strptime(val.strip(), "%Y-%m-%d").day
                     d_int = int(float(val))
@@ -135,7 +159,6 @@ class OknoEdycjiPracownika(ctk.CTkToplevel):
                 messagebox.showwarning("Informacja", "Nie udało się odczytać prawidłowych dni z pliku CSV.", parent=self)
                 return
 
-            # Aktualizacja checkboksów
             for d, var in self.checkboxy_dni.items():
                 var.set(d in wyselekcjonowane)
 
@@ -161,21 +184,49 @@ class OknoEdycjiPracownika(ctk.CTkToplevel):
             messagebox.showerror("Błąd", "Wprowadź poprawną część etatu (np. 1.0, 0.5).", parent=self)
             return
 
-        wybrane_dni = [str(d) for d, var in self.checkboxy_dni.items() if var.get()]
+        # 1. Pobranie dni miesiąca
+        wybrane_dni = sorted([d for d, var in self.checkboxy_dni.items() if var.get()])
         if not wybrane_dni:
             messagebox.showerror("Błąd", "Zaznacz co najmniej jeden dzień pracy.", parent=self)
             return
+        dni_pracy_str = ",".join(map(str, wybrane_dni))
 
-        dni_pracy_str = ",".join(wybrane_dni)
+        # 2. Pobranie preferowanych dni tygodnia
+        wybrane_pref_tyg = sorted([idx for idx, var in self.checkboxy_pref_tyg.items() if var.get()])
+        pref_dni_tyg_str = ",".join(map(str, wybrane_pref_tyg))
 
-        if self.pracownik:
-            db_aktualizuj_pracownika(self.pracownik.db_id, imie, nazwisko, etat, dni_pracy_str)
+        # 3. Pobranie preferowanej pory dnia
+        val_pora = self.option_pora_dnia.get()
+        if "Dzień" in val_pora:
+            pref_pora_dnia_str = "D"
+        elif "Noc" in val_pora:
+            pref_pora_dnia_str = "N"
         else:
-            db_dodaj_pracownika(imie, nazwisko, etat, dni_pracy_str)
+            pref_pora_dnia_str = ""
+
+        # 4. Zapis do bazy
+        if self.pracownik:
+            db_aktualizuj_pracownika(
+                self.pracownik.db_id,
+                imie,
+                nazwisko,
+                etat,
+                dni_pracy_str,
+                pref_dni_tyg_str,
+                pref_pora_dnia_str
+            )
+        else:
+            db_dodaj_pracownika(
+                imie,
+                nazwisko,
+                etat,
+                dni_pracy_str,
+                pref_dni_tyg_str,
+                pref_pora_dnia_str
+            )
 
         self.wynik = True
         self.destroy()
-
 
 class TabelaGrafikApp(ctk.CTk):
     STATUSY = ["P", "D", "N", "UUW", "M", "4", "L4", "X"]
@@ -232,22 +283,8 @@ class TabelaGrafikApp(ctk.CTk):
         self.bind_all("<Key>", self._obsluga_klawisza)
 
     def _wczytaj_pracownikow_z_bazy(self):
-        rekordy = db_pobierz_pracownikow()
-        if not rekordy:
-            domyslne = [
-                ("Jan", "Kowalski", 1.0, "0,1,2,3,4"),
-                ("Anna", "Nowak", 1.0, "0,1,2,3,4,5,6"),
-                ("Piotr", "Wiśniewski", 0.5, "0,1,2,3,4"),
-                ("Katarzyna", "Wójcik", 0.75, "0,1,2,3,4,5,6")
-            ]
-            for imie, nazwisko, etat, dni in domyslne:
-                db_dodaj_pracownika(imie, nazwisko, etat, dni)
-            rekordy = db_pobierz_pracownikow()
-
-        return [
-            Pracownik(p[1], p[2], p[3], dni_pracy=p[4], db_id=p[0])
-            for p in rekordy
-        ]
+    # db_pobierz_pracownikow() zwraca już gotową listę obiektów Pracownik
+        return db_pobierz_pracownikow()
 
     def _zbuduj_ui(self):
         top_frame = ctk.CTkFrame(self)
