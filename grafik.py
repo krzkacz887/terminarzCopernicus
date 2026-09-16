@@ -488,7 +488,7 @@ class TabelaGrafikApp(ctk.CTk):
         self.h_scroll.pack(side="bottom", fill="x")
         self.canvas.pack(side="left", fill="both", expand=True)
 
-        self.right_frame = ctk.CTkFrame(self.main_container, width=260)
+        self.right_frame = ctk.CTkFrame(self.main_container, width=300)
         self.right_frame.pack(side="right", fill="y", padx=(2, 0))
         self.right_frame.pack_propagate(False)
 
@@ -533,6 +533,8 @@ class TabelaGrafikApp(ctk.CTk):
         )
 
     def _wygeneruj_tabele(self):
+        self.update_idletasks()
+
         for w in self.left_frame.winfo_children():
             w.destroy()
         for w in self.scroll_frame.winfo_children():
@@ -555,8 +557,11 @@ class TabelaGrafikApp(ctk.CTk):
                 text_color=kolor,
                 font=ctk.CTkFont(size=11, weight="bold"),
                 width=65,
-                command=lambda d=dzien_obj: self.obsluz_zmiane_swieta(d)
+                # Przekazujemy 'lbl' jako argument do funkcji obsługi:
+                command=lambda d=dzien_obj, b=None: None # Definiujemy chwilowo, poprawiamy niżej
             )
+            # Zróbmy to elegancko:
+            lbl.configure(command=lambda d=dzien_obj, b=lbl: self.obsluz_zmiane_swieta(d, b))
             lbl.grid(row=0, column=col_idx, padx=1, pady=5)
 
         ctk.CTkLabel(self.right_frame, text="Suma godz. / Bilans", font=ctk.CTkFont(weight="bold"), height=35).pack(fill="x", padx=5, pady=5)
@@ -564,7 +569,6 @@ class TabelaGrafikApp(ctk.CTk):
         for r_idx, p in enumerate(self.pracownicy):
             lbl_emp = ctk.CTkLabel(self.left_frame, text=p.pelne_nazwisko, anchor="w", height=28, cursor="hand2")
             lbl_emp.pack(fill="x", padx=5, pady=3)
-            # Podwójne kliknięcie na pracownika otwiera edycję
             lbl_emp.bind("<Double-Button-1>", lambda e, prac=p: self._otworz_edycje_pracownika(prac))
 
             for c_idx, dzien_obj in enumerate(self.obj_miesiac.dni):
@@ -616,8 +620,11 @@ class TabelaGrafikApp(ctk.CTk):
 
         self.przelicz_sumy()
 
-    def obsluz_zmiane_swieta(self, dzien_obj):
+    def obsluz_zmiane_swieta(self, dzien_obj, przycisk_widget=None):
+        # 1. Zmiana statusu święta w obiekcie
         dzien_obj.zmien_swieta()
+
+        # 2. Przeliczenie normy godzin
         if hasattr(self.obj_miesiac, "przelicz_norme"):
             self.obj_miesiac.przelicz_norme()
             self.norma_miesiaca = self.obj_miesiac.norma_miesiaca
@@ -628,11 +635,43 @@ class TabelaGrafikApp(ctk.CTk):
             )
             self.norma_miesiaca = dni_robocze * 8.0
             self.obj_miesiac.norma_miesiaca = self.norma_miesiaca
-        if hasattr(self, "norma_miesiaca_entry"):
+
+        if hasattr(self, "norma_miesiaca_entry") and self.norma_miesiaca_entry:
             self.norma_miesiaca_entry.delete(0, "end")
             self.norma_miesiaca_entry.insert(0, str(int(self.norma_miesiaca)))
 
-        self._wygeneruj_tabele()
+        kolor = "dodgerblue" if (dzien_obj.czy_roboczy == False or dzien_obj.czy_swieto == True) else "white"
+
+        if przycisk_widget:
+            przycisk_widget.configure(text_color=kolor)
+        else:
+            self._wygeneruj_tabele()
+            return
+        self.przelicz_sumy()
+
+    def _pobierz_godziny_poprzedniego_miesiaca(self, pracownik: Pracownik) -> float:
+        """Pobiera wyrobione godziny pracownika z poprzedniego miesiąca (z pliku Excel)."""
+        if self.wybrany_miesiac == 1:
+            poprz_miesiac = 12
+            poprz_rok = self.wybrany_rok - 1
+        else:
+            poprz_miesiac = self.wybrany_miesiac - 1
+            poprz_rok = self.wybrany_rok
+
+        filename = f"grafiki/grafik_stany_{poprz_rok}_{poprz_miesiac:02d}.xlsx"
+        if not os.path.exists(filename):
+            return 0.0
+
+        try:
+            df = pd.read_excel(filename, dtype=str)
+            wiersz_prac = df[(df["Imię"] == pracownik.imie) & (df["Nazwisko"] == pracownik.nazwisko)]
+            if not wiersz_prac.empty and "Suma godz." in df.columns:
+                val = wiersz_prac.iloc[0]["Suma godz."]
+                if pd.notna(val):
+                    return float(val)
+        except Exception:
+            pass
+        return 0.0
     def _otworz_edycje_pracownika(self, pracownik: Pracownik):
         okno = OknoEdycjiPracownika(self, pracownik)
         self.wait_window(okno)
@@ -782,29 +821,63 @@ class TabelaGrafikApp(ctk.CTk):
         return licznik
 
     def _przelicz_pracownika(self, pracownik: Pracownik):
-        suma_godzin = 0.0
-
+        # 1. Obliczamy godziny z aktualnie otwartego w oknie miesiąca
+        suma_godzin_biezaca = 0.0
         for dzien_obj in self.obj_miesiac.dni:
             stan = dzien_obj.pobierz_zmiane(pracownik.db_id)
             if stan == "UUW":
-                suma_godzin += 8.0 * pracownik.etat
+                suma_godzin_biezaca += 8.0 * pracownik.etat
             elif stan in ["D", "N"]:
-                suma_godzin += 12.0
+                suma_godzin_biezaca += 12.0
             elif stan == "M":
-                suma_godzin += 8.0
+                suma_godzin_biezaca += 8.0
             elif stan == "4":
-                suma_godzin += 4.0
+                suma_godzin_biezaca += 4.0
 
-        pracownik.wyrobione_godziny = suma_godzin
-        norma_pracownika = pracownik.get_norma_miesiaca(self.norma_miesiaca)
+        pracownik.wyrobione_godziny = suma_godzin_biezaca
+        norma_biezaca = pracownik.get_norma_miesiaca(self.norma_miesiaca)
 
-        suma_str = f"{int(suma_godzin)}" if suma_godzin.is_integer() else f"{suma_godzin:.1f}"
-        norma_str = f"{int(norma_pracownika)}" if norma_pracownika.is_integer() else f"{norma_pracownika:.1f}"
+        # 2. Ustalamy, które dwa miesiące tworzą bieżący okres dwumiesięczny
+        if self.wybrany_miesiac % 2 != 0:
+            # Miesiąc nieparzysty (np. Styczeń = 1), sparowany z następnym (Luty = 2)
+            m1, r1 = self.wybrany_miesiac, self.wybrany_rok
+            m2, r2 = self.wybrany_miesiac + 1, self.wybrany_rok
+
+            g1, n1 = suma_godzin_biezaca, norma_biezaca
+            g2, n2 = self._pobierz_dane_konkretnego_miesiaca(pracownik, m2, r2)
+        else:
+            # Miesiąc parzysty (np. Luty = 2), sparowany z poprzednim (Styczeń = 1)
+            m1, r1 = self.wybrany_miesiac - 1, self.wybrany_rok
+            m2, r2 = self.wybrany_miesiac, self.wybrany_rok
+
+            g1, n1 = self._pobierz_dane_konkretnego_miesiaca(pracownik, m1, r1)
+            g2, n2 = suma_godzin_biezaca, norma_biezaca
+
+        # 3. Bilans dwumiesięczny
+        lacznie_2m_godziny = g1 + g2
+        lacznie_2m_norma = n1 + n2
+        nadgodziny_2m = lacznie_2m_godziny - lacznie_2m_norma
+
+        # Formatowanie tekstowe
+        g1_str = f"{int(g1)}" if g1.is_integer() else f"{g1:.1f}"
+        n1_str = f"{int(n1)}" if n1.is_integer() else f"{n1:.1f}"
+        g2_str = f"{int(g2)}" if g2.is_integer() else f"{g2:.1f}"
+        n2_str = f"{int(n2)}" if n2.is_integer() else f"{n2:.1f}"
+
+        nadg_znak = "+" if nadgodziny_2m > 0 else ""
+        nadg_str = f"{nadg_znak}{int(nadgodziny_2m)}" if nadgodziny_2m.is_integer() else f"{nadg_znak}{nadgodziny_2m:.1f}"
 
         stany = self._zlicz_stany(pracownik)
-        stany_str = f"D:{stany['D']} | N:{stany['N']} | U:{stany['UUW']} | M:{stany['M']} | 4:{stany['4']} | L:{stany['L4']} | X:{stany['X']}"
+        stany_str = f"D:{stany['D']} | N:{stany['N']} | U:{stany['UUW']} | M:{stany['M']} | 4:{stany['4']} | X:{stany['X']}"
 
-        tekst = f"{suma_str}/{norma_str}h \n{stany_str}"
+        # Nazwy miesięcy
+        miesiac_skroty = ["", "Sty", "Lut", "Mar", "Kwi", "Maj", "Cze", "Lip", "Sie", "Wrz", "Paź", "Lis", "Gru"]
+        nazwa1 = miesiac_skroty[m1]
+        nazwa2 = miesiac_skroty[m2]
+
+        # Wyświetlanie zawsze obu miesięcy w 2 liniach
+        tekst = f"{nazwa1}: {g1_str}/{n1_str}h | {nazwa2}: {g2_str}/{n2_str}h | Nadg: {nadg_str}h\n{stany_str}"
+
         if pracownik in self.etykiety_sum:
             self.etykiety_sum[pracownik].configure(text=tekst)
 
@@ -857,21 +930,70 @@ class TabelaGrafikApp(ctk.CTk):
         try:
             self.zapisz_do_excela()
             self.wybrany_rok = int(self.rok_entry.get())
-            self.wybrany_miesiac = int(self.miesiac_option.get())
+            if args and args[0]:
+                self.wybrany_miesiac = int(args[0])
+            else:
+                self.wybrany_miesiac = int(self.miesiac_option.get())
+
             self.obj_miesiac = Miesiac(self.wybrany_rok, self.wybrany_miesiac)
+
             dni_robocze = sum(
                 1 for d in self.obj_miesiac.dni
                 if getattr(d, "czy_roboczy", True) and not getattr(d, "czy_swieto", False)
             )
             self.norma_miesiaca = dni_robocze * 8.0
             self.obj_miesiac.norma_miesiaca = self.norma_miesiaca
-            if hasattr(self, "entry_wymiar"):
-                self.entry_wymiar.delete(0, "end")
-                self.entry_wymiar.insert(0, str(int(self.norma_miesiaca)))
             self._wygeneruj_tabele()
+            if hasattr(self, "norma_miesiaca_entry") and self.norma_miesiaca_entry:
+                self.norma_miesiaca_entry.delete(0, "end")
+                self.norma_miesiaca_entry.insert(0, str(int(self.norma_miesiaca)))
 
         except ValueError:
             messagebox.showerror("Błąd", "Wprowadź poprawny rok.", parent=self)
+        except Exception as e:
+            messagebox.showerror("Błąd", f"Wystąpił błąd: {e}", parent=self)
+
+    def _pobierz_dane_konkretnego_miesiaca(self, pracownik: Pracownik, miesiac: int, rok: int) -> tuple[float, float]:
+        """Pobiera wyrobione godziny oraz normę pracownika dla wskazanego miesiąca i roku z pliku Excel."""
+        # Jeśli to bieżący miesiąc, który właśnie edytujemy w oknie, moglibyśmy brać z pamięci,
+        # ale plik Excel też zadziała (o ile zapisano) lub damy bezpieczny fallback.
+        filename = f"grafiki/grafik_stany_{rok}_{miesiac:02d}.xlsx"
+        domyslna_norma = 160.0 * pracownik.etat
+
+        if not os.path.exists(filename):
+            return 0.0, domyslna_norma
+
+        try:
+            df = pd.read_excel(filename, dtype=str)
+            wiersz_prac = df[(df["Imię"] == pracownik.imie) & (df["Nazwisko"] == pracownik.nazwisko)]
+
+            if not wiersz_prac.empty:
+                godziny = 0.0
+                for kol in ["Suma godz.", "Godziny", "Wyrobione godziny"]:
+                    if kol in df.columns and pd.notna(wiersz_prac.iloc[0][kol]):
+                        try:
+                            godziny = float(wiersz_prac.iloc[0][kol])
+                            break
+                        except ValueError:
+                            pass
+
+                norma = 0.0
+                for kol in ["Norma", "Norma miesiąca", "Wymiar godzin", "Wymiar"]:
+                    if kol in df.columns and pd.notna(wiersz_prac.iloc[0][kol]):
+                        try:
+                            norma = float(wiersz_prac.iloc[0][kol])
+                            break
+                        except ValueError:
+                            pass
+
+                if norma == 0.0:
+                    norma = domyslna_norma
+
+                return godziny, norma
+        except Exception:
+            pass
+
+        return 0.0, domyslna_norma
 
     def wczytaj_z_excela(self):
         filename = f"grafiki/grafik_stany_{self.wybrany_rok}_{self.wybrany_miesiac:02d}.xlsx"
@@ -880,7 +1002,6 @@ class TabelaGrafikApp(ctk.CTk):
                 dzien_obj.ustaw_zmiane(prac.db_id, "P")
                 self._odswiez_kolor_komorki(r, c)
             return
-
         try:
             df = pd.read_excel(filename, dtype=str)
             for (r, c), (prac, dzien_obj) in self.dane_pól.items():
@@ -892,13 +1013,63 @@ class TabelaGrafikApp(ctk.CTk):
                     wartosc = wiersz_prac.iloc[0][naglowek_excel]
                     if pd.notna(wartosc) and str(wartosc).strip() in self.STATUSY:
                         stan = str(wartosc).strip()
-
                 self.pola[(r, c)].set(stan)
                 dzien_obj.ustaw_zmiane(prac.db_id, stan)
                 self._odswiez_kolor_komorki(r, c)
-
         except Exception as e:
             messagebox.showerror("Błąd odczytu", f"Nie udało się wczytać grafiku z Excela:\n{e}", parent=self)
+
+    def _pobierz_dane_pierwszego_miesiac_okresu(self, pracownik: Pracownik) -> tuple[float, float]:
+        """
+        Jeśli bieżący miesiąc to parzysty miesiąc okresu (np. luty, kwiecień),
+        pobiera dane z nieparzystego miesiąca tego samego okresu (styczeń, marzec).
+        Jeśli to nieparzysty miesiąc (początek okresu), zwraca 0.0, 0.0.
+        """
+        # Sprawdzamy czy to nieparzysty miesiąc (początek okresu: 1, 3, 5, 7, 9, 11)
+        if self.wybrany_miesiac % 2 != 0:
+            return 0.0, 0.0
+
+        # Skoro to miesiąc parzysty (2, 4, 6...), pierwszym miesiącem okresu jest miesiąc poprzedni w tym samym roku
+        pierwszy_miesiac = self.wybrany_miesiac - 1
+        rok = self.wybrany_rok
+
+        filename = f"grafiki/grafik_stany_{rok}_{pierwszy_miesiac:02d}.xlsx"
+        domyslna_norma = 160.0 * pracownik.etat
+
+        if not os.path.exists(filename):
+            return 0.0, domyslna_norma
+
+        try:
+            df = pd.read_excel(filename, dtype=str)
+            wiersz_prac = df[(df["Imię"] == pracownik.imie) & (df["Nazwisko"] == pracownik.nazwisko)]
+
+            if not wiersz_prac.empty:
+                godziny = 0.0
+                for kol in ["Suma godz.", "Godziny", "Wyrobione godziny"]:
+                    if kol in df.columns and pd.notna(wiersz_prac.iloc[0][kol]):
+                        try:
+                            godziny = float(wiersz_prac.iloc[0][kol])
+                            break
+                        except ValueError:
+                            pass
+
+                norma = 0.0
+                for kol in ["Norma", "Norma miesiąca", "Wymiar godzin", "Wymiar"]:
+                    if kol in df.columns and pd.notna(wiersz_prac.iloc[0][kol]):
+                        try:
+                            norma = float(wiersz_prac.iloc[0][kol])
+                            break
+                        except ValueError:
+                            pass
+
+                if norma == 0.0:
+                    norma = domyslna_norma
+
+                return godziny, norma
+        except Exception:
+            pass
+
+        return 0.0, domyslna_norma
 
     def zapisz_do_excela(self):
         self.przelicz_sumy()
